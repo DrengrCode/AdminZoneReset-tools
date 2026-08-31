@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+AdminZoneReset_ProtectedChunks.txt
+
+# Superseded pre-build/swap-design scripts - kept on disk for reference,
+# deliberately not part of the public release. Listed here so a plain
+# `git add -A` can't accidentally sweep them back into a commit again.
+find_deletable_chunks.py
+sftp_chunk_cleanup.py
