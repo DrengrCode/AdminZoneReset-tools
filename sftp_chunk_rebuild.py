@@ -63,6 +63,7 @@ SFTP account to a different root than the real filesystem path.
 import argparse
 import getpass
 import os
+import socket
 import sys
 import time
 
@@ -71,6 +72,42 @@ try:
 except ImportError:
     print("This script needs the 'paramiko' package. Install it with:\n    pip install paramiko")
     sys.exit(1)
+
+# How long to wait for the TCP connection and SSH handshake before giving up.
+# Without an explicit timeout, paramiko/socket will block INDEFINITELY if a
+# host/port is unreachable (firewall silently dropping packets, wrong port,
+# etc) rather than failing fast - same fix as admin_zone_reset_gui.py, ported
+# here after being found the hard way in real testing of the GUI version.
+CONNECT_TIMEOUT_SECONDS = 15
+
+
+def open_sftp(host, port, user, password, pkey):
+    """Opens an SFTP session with a bounded connect timeout, and a clear,
+    actionable error instead of a raw traceback (or an infinite hang) if the
+    host/port is wrong or unreachable. Many hosting panels expose SFTP on a
+    dedicated port that's different from the port their web file manager
+    runs on (2022 is common) - worth checking your host's panel for a
+    separate "SFTP"/"File Access" section if this times out."""
+    print(f"\nConnecting to {host}:{port} as {user} ...")
+    try:
+        sock = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT_SECONDS)
+    except (socket.timeout, OSError) as e:
+        print(
+            f"Could not reach {host}:{port} within {CONNECT_TIMEOUT_SECONDS}s ({e}). "
+            "Double-check the host and port - many hosting panels use a dedicated "
+            "SFTP port (2022 is common) that's different from the port their web "
+            "file manager uses."
+        )
+        sys.exit(1)
+    transport = paramiko.Transport(sock)
+    try:
+        transport.banner_timeout = CONNECT_TIMEOUT_SECONDS
+        transport.auth_timeout = CONNECT_TIMEOUT_SECONDS
+        transport.connect(username=user, password=password, pkey=pkey)
+    except Exception:
+        transport.close()
+        raise
+    return transport, paramiko.SFTPClient.from_transport(transport)
 
 # Build 42: map/<floor(x/8)>/<floor(y/8)>.bin - confirmed against the actual
 # source of a maintained, currently-working B42 chunk-cleaning tool (older
@@ -179,7 +216,15 @@ def do_build(sftp, remote_map_dir, keep, new_map_dir):
     print("script again with --mode swap.")
 
 
-def do_swap(sftp, remote_map_dir, new_map_dir):
+def do_swap(sftp, remote_map_dir, new_map_dir, backup_dir):
+    # Confirmation already happened in main(), BEFORE this connection was
+    # ever opened - see the --mode swap branch below. It used to happen here
+    # instead, after connecting, which left the SFTP session open and
+    # completely idle for however long a human took to read the plan and
+    # type SWAP - long enough, in real testing of the GUI version, for the
+    # server to close the idle connection out from under it ("Socket is
+    # closed", mid-rename). Asking first and connecting immediately before
+    # acting removes that idle window entirely.
     if not remote_exists(sftp, new_map_dir):
         print(f"\n{new_map_dir} doesn't exist - run --mode build first.")
         sys.exit(1)
@@ -187,19 +232,9 @@ def do_swap(sftp, remote_map_dir, new_map_dir):
         print(f"\n{remote_map_dir} doesn't exist - nothing to swap out. Aborting to be safe.")
         sys.exit(1)
 
-    backup_dir = f"{remote_map_dir.rstrip('/')}_previous_{time.strftime('%Y%m%d_%H%M%S')}"
-
-    print("\nThis will:")
+    print("\nProceeding with the confirmed swap:")
     print(f"  1. Rename {remote_map_dir}  ->  {backup_dir}")
     print(f"  2. Rename {new_map_dir}  ->  {remote_map_dir}")
-    print("\nStep 1 keeps your entire previous map fully intact under the backup name -")
-    print("nothing is deleted. You can undo this whole swap later by renaming it back")
-    print("yourself, until you're confident and remove it via SFTP to reclaim space.")
-    print("\nMAKE SURE THE SERVER IS STOPPED before continuing.")
-    confirm = input("Type SWAP (all caps) to proceed, anything else to cancel: ")
-    if confirm != "SWAP":
-        print("Cancelled - nothing was touched.")
-        return
 
     sftp.posix_rename(remote_map_dir, backup_dir) if hasattr(sftp, "posix_rename") else sftp.rename(remote_map_dir, backup_dir)
     sftp.posix_rename(new_map_dir, remote_map_dir) if hasattr(sftp, "posix_rename") else sftp.rename(new_map_dir, remote_map_dir)
@@ -242,6 +277,24 @@ def main():
             print("\nThe keep-list is EMPTY - refusing to build a map_new/ that would protect nothing.")
             sys.exit(1)
 
+    backup_dir = None
+    if args.mode == "swap":
+        # Ask for confirmation BEFORE opening any connection - not after.
+        # See the comment on do_swap() for why: no connection should ever
+        # sit open and idle waiting on a human to type a word.
+        backup_dir = f"{args.remote_map_dir.rstrip('/')}_previous_{time.strftime('%Y%m%d_%H%M%S')}"
+        print("\nThis will:")
+        print(f"  1. Rename {args.remote_map_dir}  ->  {backup_dir}")
+        print(f"  2. Rename {new_map_dir}  ->  {args.remote_map_dir}")
+        print("\nStep 1 keeps your entire previous map fully intact under the backup name -")
+        print("nothing is deleted. You can undo this whole swap later by renaming it back")
+        print("yourself, until you're confident and remove it via SFTP to reclaim space.")
+        print("\nMAKE SURE THE SERVER IS STOPPED before continuing.")
+        confirm = input("Type SWAP (all caps) to proceed, anything else to cancel: ")
+        if confirm != "SWAP":
+            print("Cancelled - nothing was touched. No connection was even opened.")
+            sys.exit(0)
+
     pkey = None
     password = None
     if args.key:
@@ -249,16 +302,12 @@ def main():
     else:
         password = getpass.getpass(f"Password for {args.username}@{args.host}: ")
 
-    print(f"\nConnecting to {args.host}:{args.port} as {args.username} ...")
-    transport = paramiko.Transport((args.host, args.port))
+    transport, sftp = open_sftp(args.host, args.port, args.username, password, pkey)
     try:
-        transport.connect(username=args.username, password=password, pkey=pkey)
-        sftp = paramiko.SFTPClient.from_transport(transport)
-
         if args.mode == "build":
             do_build(sftp, args.remote_map_dir, keep, new_map_dir)
         else:
-            do_swap(sftp, args.remote_map_dir, new_map_dir)
+            do_swap(sftp, args.remote_map_dir, new_map_dir, backup_dir)
     finally:
         transport.close()
 
