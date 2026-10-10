@@ -7,3 +7,9 @@ AdminZoneReset_ProtectedChunks.txt
 # `git add -A` can't accidentally sweep them back into a commit again.
 find_deletable_chunks.py
 sftp_chunk_cleanup.py
+
+# Area reset app: local settings and build output
+area_reset_config.json
+build/
+dist/
+*.spec
