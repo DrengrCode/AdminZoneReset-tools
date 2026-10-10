@@ -26,7 +26,22 @@ name until you delete it yourself.
 - **`sftp_chunk_rebuild.py`** - the same logic as a command-line tool, if
   you'd rather script it or run it headless.
 
-Both need your keep-list file, which the AdminZoneReset mod writes for
+- **`area_reset_gui.py`** - reset just *some areas* (shops, a town, spawn
+  zones) without a full wipe. It reads the same `AdminZoneReset_Shared.txt`
+  zone file the Zone Reset Planner reads, so you tick zones by name instead
+  of typing coordinates. It works out the protected chunks itself (protected
+  zones, plus safehouses with a 16-tile buffer) and never touches them. Reset
+  *moves* the chunk files into a `map_reset_trash/` folder next to `map/`, so
+  the server regenerates those areas from the original map; "Empty trash"
+  deletes them for good. Build a double-click app with `build_exe.bat`
+  (produces `dist\AreaReset.exe`, settings saved next to it; the password is
+  never saved).
+
+  Use it only when the server is stopped, or when nobody is near the zones: a
+  running server writes loaded chunks back and silently undoes the reset.
+  Back up your `map/` folder before the first real run.
+
+The two tools above need your keep-list file, which the AdminZoneReset mod writes for
 you in-game via its right-click menu's "Generate protected chunk list"
 option, saved locally to your `Zomboid/Lua/AdminZoneReset_ProtectedChunks.txt`.
 
